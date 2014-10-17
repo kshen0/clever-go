@@ -1,14 +1,37 @@
 package clever
 
 import (
+	"code.google.com/p/goauth2/oauth"
+	"encoding/json"
 	"fmt"
+	mock "github.com/Clever/clever-go/mock"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 )
 
+var dummytransport = &oauth.Transport{
+	Token: &oauth.Token{AccessToken: "doesntmatter"},
+}
+
+func TestBasicAuthTransport(t *testing.T) {
+	bat := &BasicAuthTransport{"user", "pass"}
+	client := bat.Client()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Basic dXNlcjpwYXNz" {
+			t.Fatal("unexpected auth header")
+		}
+	}))
+	if _, err := client.Get(ts.URL); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestQueryDistricts(t *testing.T) {
-	clever := NewMock("./data")
+	clever := New(mock.NewMock(nil, "./data"))
 	results := clever.QueryAll("/v1.1/districts", nil)
+
 	if !results.Next() {
 		t.Fatal("Found no districts")
 	}
@@ -32,7 +55,7 @@ func TestQueryDistricts(t *testing.T) {
 }
 
 func TestQuerySchools(t *testing.T) {
-	clever := NewMock("./data")
+	clever := New(mock.NewMock(nil, "./data"))
 	results := clever.QueryAll("/v1.1/schools", nil)
 	if !results.Next() {
 		t.Fatal("Found no schools")
@@ -73,7 +96,7 @@ func TestQuerySchools(t *testing.T) {
 }
 
 func TestQueryTeachers(t *testing.T) {
-	clever := NewMock("./data")
+	clever := New(mock.NewMock(nil, "./data"))
 	results := clever.QueryAll("/v1.1/teachers", nil)
 	if !results.Next() {
 		t.Fatal("Found no teachers")
@@ -110,7 +133,7 @@ func TestQueryTeachers(t *testing.T) {
 }
 
 func TestQueryStudents(t *testing.T) {
-	clever := NewMock("./data")
+	clever := New(mock.NewMock(nil, "./data"))
 	results := clever.QueryAll("/v1.1/students", nil)
 	if !results.Next() {
 		t.Fatal("Found no students")
@@ -159,7 +182,7 @@ func TestQueryStudents(t *testing.T) {
 }
 
 func TestQuerySections(t *testing.T) {
-	clever := NewMock("./data")
+	clever := New(mock.NewMock(nil, "./data"))
 	results := clever.QueryAll("/v1.1/sections", nil)
 	if !results.Next() {
 		t.Fatal("Found no sections")
@@ -199,8 +222,33 @@ func TestQuerySections(t *testing.T) {
 	}
 }
 
+func postDistrictTest(req *http.Request, params map[string]string) error {
+	district := District{}
+	if err := json.NewDecoder(req.Body).Decode(&district); err != nil {
+		return fmt.Errorf("{\"error\":\"%s\"}", err.Error())
+	}
+	if req.Header.Get("Content-Type") != "application/json" {
+		return fmt.Errorf("{\"error\":\"%s\"}", "Error formatting post request header")
+	}
+	if district.Name != "new name district" {
+		return fmt.Errorf("{\"error\":\"%s\"}", "Error formatting post request body")
+	}
+	return nil
+}
+
+func TestPostRequest(t *testing.T) {
+	clever := New(mock.NewMock(postDistrictTest, "./data"))
+	resp := map[string]string{}
+	district1 := District{
+		Name: "new name district",
+	}
+	if err := clever.Request("POST", "/v1.1/districts", nil, district1, &resp); err != nil {
+		t.Fatalf("Error posting district: %s\n", err)
+	}
+}
+
 func TestQueryAll(t *testing.T) {
-	clever := NewMock("./data")
+	clever := New(mock.NewMock(nil, "./data"))
 	result := clever.QueryAll("/v1.1/sections", nil)
 
 	count := 0
@@ -209,8 +257,60 @@ func TestQueryAll(t *testing.T) {
 		result.Scan(&section)
 		count++
 	}
-
 	if count != 2 {
 		t.Fatalf("Did not get both section pages.")
+	}
+}
+
+func TestQueryHeaders(t *testing.T) {
+	req, _ := http.NewRequest("get", "request/headers", nil)
+	setTrackingHeaders(req)
+	if len(req.Header.Get("User-Agent")) <= 0 {
+		t.Fatalf("User-Agent header not set")
+	}
+	var customUa map[string]string
+	if err := json.Unmarshal([]byte(req.Header.Get("X-Clever-Client-User-Agent")), &customUa); err != nil {
+		t.Fatalf("Could not read the 'X-Clever-Client-User-Agent' header")
+	}
+	var ok bool
+	if _, ok = customUa["lang"]; !ok {
+		t.Fatalf("lang not set in custom user agent header")
+	}
+	if _, ok = customUa["lang_version"]; !ok {
+		t.Fatalf("lang version not set in custom user agent header")
+	}
+	if _, ok = customUa["platform"]; !ok {
+		t.Fatalf("platform not set in custom user agent header")
+	}
+	if _, ok = customUa["uname"]; !ok {
+		t.Fatalf("uname not set in custom user agent header")
+	}
+	if _, ok = customUa["publisher"]; !ok {
+		t.Fatalf("publisher not set in custom user agent header")
+	}
+	if _, ok = customUa["bindings_version"]; !ok {
+		t.Fatalf("bindings version not set in custom user agent header")
+	}
+}
+
+func TestTooManyRequestsError(t *testing.T) {
+	clever := New(mock.NewMock(nil, "./data"))
+	result := clever.QueryAll("/mock/rate/limiter", nil)
+	result.Next()
+	if result.Error() == nil {
+		t.Fatalf("Http response 429 (TooManyRequests) did not trigger an error as expected.")
+	} else if _, ok := result.Error().(*TooManyRequestsError); !ok {
+		t.Fatalf("Http response 429 (TooManyRequests) did not generate the expected error.")
+	}
+}
+
+func TestHandlesErrors(t *testing.T) {
+	clever := New(mock.NewMock(nil, "./data"))
+	result := clever.QueryAll("/mock/error", nil)
+	result.Next()
+	if result.Error() == nil {
+		t.Fatalf("error endpoint did not trigger an error as expected")
+	} else if result.Error().Error() != "there was an error (1337)" {
+		t.Fatalf("error endpoint did not generate the expected error: %s", result.Error().Error())
 	}
 }
